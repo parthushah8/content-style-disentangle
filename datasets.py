@@ -36,12 +36,17 @@ class YelpDataset(Dataset):
 
     def __getitem__(self, idx):
         sentence, label = self.sentences[idx], self.labels[idx]
-        dec_sentence = [self.dec_bos_token + s + self.dec_eos_token for s in sentence]
-        dec_sentence_wprompt = [self.dec_bos_token + self.label_prompt[label] + self.dec_sep_token + s + self.dec_eos_token for s in sentence]
-        
         enc_tokenized = self.enc_tokenizer(sentence, add_special_tokens=True, return_tensors='pt')
-        dec_tokenized = self.dec_tokenizer(dec_sentence, add_special_tokens=True, return_tensors="pt")
-        dec_tokenized_wprompt = self.dec_tokenizer(dec_sentence_wprompt, add_special_tokens=True, return_tensors="pt")
+        if self.dec_tokenizer:
+            dec_sentence = [self.dec_bos_token + s + self.dec_eos_token for s in sentence]
+            dec_sentence_wprompt = [self.dec_bos_token + self.label_prompt[label] + self.dec_sep_token + s + self.dec_eos_token for s in sentence]
+            
+            dec_tokenized = self.dec_tokenizer(dec_sentence, add_special_tokens=True, return_tensors="pt")
+            dec_tokenized_wprompt = self.dec_tokenizer(dec_sentence_wprompt, add_special_tokens=True, return_tensors="pt")
+
+        else:
+            dec_tokenized = {'input_ids': torch.tensor([[]]), 'attention_mask': torch.tensor([[]])}
+            dec_tokenized_wprompt = {'input_ids': torch.tensor([[]]), 'attention_mask': torch.tensor([[]])}
 
         label = torch.tensor(label)
         label = torch.nn.functional.one_hot(label.to(torch.int64), self.num_classes)

@@ -77,10 +77,10 @@ class RobertaEncoder(RobertaPreTrainedModel):
             bce_loss = self.bce_loss(self.sigmoid(unnorm_logits), labels)
             adv_loss = self.bce_loss(self.sigmoid(unnorm_logits), flipped_labels)
             # from IPython import embed; embed(); exit()
+            return content_encoding, bce_loss, adv_loss
         else:
             bce_loss, adv_loss = None, None
-
-        return content_encoding, bce_loss, adv_loss
+            return content_encoding, self.sigmoid(unnorm_logits)
     
 class GPT2Decoder(nn.Module): ## HF doc for PretrainModel
 
@@ -111,17 +111,141 @@ class GPT2Decoder(nn.Module): ## HF doc for PretrainModel
         decoder_output = self.gpt2.forward(
             inputs_embeds = inputs_embeds
         )
+        logits = decoder_output.logits[:, 1:-1, :]
 
         # Target Ids to calculate the NLL loss
         target_ids = input_ids[:, 1:]
         effective_mask = attention_mask[:, 1:].to(torch.float)
 
         # Calculate NLL Loss between the the Target Ids and the decoder logit output
-        nll_loss = -decoder_output.logits[:, 2:, :].log_softmax(dim=-1).gather(
-            dim=-1, index=target_ids.unsqueeze(dim=-1)).reshape_as(target_ids)
+        nll_loss = -logits.log_softmax(dim=-1).gather(dim=-1, index=target_ids.unsqueeze(dim=-1)).reshape_as(target_ids)
         nll_loss = (nll_loss * effective_mask).sum(dim=-1).mean(dim=-1)
 
-        ## Doubt : Depending on which case I am in should I start picking from the fourth 
-        ##         tokens in cases when I have some prompt to begin with
+        ## Doubt : Depending on which case I am in should I start picking from the fourth tokens in cases when I have some prompt to begin with
 
         return nll_loss
+    
+    def generate(
+            self,
+            content_embedding: torch.LongTensor, 
+            max_length: int,
+            tokenizer,
+    ) -> str:
+        r"""
+        Returns the generated text for a custom embedding
+        """
+
+        # from IPython import embed; embed(); exit()
+
+        # Tokenizing Input texts
+        input_texts = ['<|endoftext|>' for i in range(content_embedding.size(0))]
+        prompts_tokenized = tokenizer.batch_encode_plus(input_texts, add_special_tokens=True, return_tensors="pt")
+        input_ids, attention_mask = prompts_tokenized['input_ids'], prompts_tokenized['attention_mask']
+
+        with torch.no_grad():
+            for _ in range(max_length - input_ids.shape[-1]):
+
+                # Create input embedding
+                position_ids = attention_mask.cumsum(dim=-1)
+                inputs_embeds_text = self.gpt2.transformer.wte(input_ids) + self.gpt2.transformer.wpe(position_ids)
+                inputs_embeds = torch.cat((
+                    content_embedding.unsqueeze(dim=1), inputs_embeds_text
+                ), dim=1)
+
+                # Forward pass and get the logits
+                logits = self.gpt2.forward(
+                    inputs_embeds = inputs_embeds
+                ).logits
+
+                # Apply temperature scaling and take the softmax to get probabilities
+                logits = logits[:, -1, :]
+                probabilities = torch.nn.functional.softmax(logits, dim=-1)
+
+                # Sample from the top_k most probable tokens
+                next_token_probs, next_token_indices = torch.topk(probabilities, 5)
+                next_token = next_token_indices.gather(dim=-1, index=torch.multinomial(next_token_probs, num_samples=1))
+
+                # Include the sampled tokens at the end input_ids
+                input_ids = torch.cat((input_ids, next_token), dim=1)
+                attention_mask = torch.cat((attention_mask, torch.ones(content_embedding.size(0), 1)), dim=1).to(attention_mask)
+
+                print(input_ids)
+
+                # from IPython import embed; embed(); exit()
+
+        return input_ids
+
+    def greedy_decode(
+            self, 
+            content_embedding: torch.LongTensor, 
+            input_ids: torch.LongTensor, 
+            attention_mask: torch.FloatTensor,
+            max_length: int
+    ) -> str:
+        r"""
+        Return the greedy decoding based on the encoded content encoding and the prompt which is '<|endoftext|> '
+        """
+        
+        # from IPython import embed; embed(); exit()
+
+        # Input Embedding tensor concatenating content embedding given by the encoder
+        position_ids = attention_mask.cumsum(dim=-1)
+        inputs_embeds_text = self.gpt2.transformer.wte(input_ids) + self.gpt2.transformer.wpe(position_ids)
+        inputs_embeds = torch.cat((
+            content_embedding.unsqueeze(dim=1), inputs_embeds_text
+        ), dim=1)
+
+        output = self.gpt2.generate(
+            inputs_embeds=inputs_embeds,
+            max_length=max_length + inputs_embeds.size(-1),
+            # pad_token_id=self.tokenizer.pad_token_id,
+            # eos_token_id=self.tokenizer.eos_token_id,
+            # position_ids=position_ids,
+            # attention_mask=torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device),
+            past_key_values=None,
+            use_cache=True,
+            num_beams=1,
+            num_beam_groups=1,
+            diversity_penalty=0.0,
+            temperature=1.0,
+        )
+
+        # decoded_sequence = self.tokenizer.decode(output[0], skip_special_tokens=True)
+        return output[0]
+    
+    def beam_search_decode(
+            self, 
+            content_embedding: torch.Tensor, 
+            input_ids: torch.LongTensor, 
+            attention_mask: torch.FloatTensor, 
+            max_length: int, 
+            beam_size: int) -> str:
+        r"""
+        Return the beam-search decoding based on the encoded content encoding and the prompt which is '<|endoftext|> '
+        """
+
+        # Input Embedding tensor concatenating content embedding given by the encoder
+        position_ids = attention_mask.cumsum(dim=-1)
+        inputs_embeds_text = self.gpt2.transformer.wte(input_ids) + self.gpt2.transformer.wpe(position_ids)
+        inputs_embeds = torch.cat((
+            content_embedding.unsqueeze(dim=1), inputs_embeds_text
+        ), dim=1)
+
+        output = self.gpt2.generate(
+            input_ids=inputs_embeds,
+            max_length=max_length + inputs_embeds.size(-1),
+            # pad_token_id=self.tokenizer.pad_token_id,
+            # eos_token_id=self.tokenizer.eos_token_id,
+            # position_ids=position_ids,
+            # attention_mask=torch.ones(input_ids.shape, dtype=torch.long, device=input_ids.device),
+            past_key_values=None,
+            use_cache=True,
+            num_beams=beam_size,
+            num_beam_groups=1,
+            diversity_penalty=0.0,
+            temperature=1.0,
+        )
+
+        decoded_sequence = self.tokenizer.decode(output[0], skip_special_tokens=True)
+        return decoded_sequence
+

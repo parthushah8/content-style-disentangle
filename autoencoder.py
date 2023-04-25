@@ -14,7 +14,7 @@ import os
 
 # Device Configuration 
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID" 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 # device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device = torch.device("cpu")
 
@@ -76,9 +76,9 @@ def trainer(config):
             if (i+1)%config['logging_interval_batch'] == 0:
                 # Log the average training loss in the last config['logging_interval_batch'] batches
                 train_nll = train_nll/config['logging_interval_batch']
-                wandb.log({
-                    "batches": epoch*len(train_loader)+i,
-                    "train_nll": train_nll})
+                # wandb.log({
+                #     "batches": epoch*len(train_loader)+i,
+                #     "train_nll": train_nll})
                 print("Batch {}: Train NLL Loss = {:.4f}".format(i+1, train_nll))
                 train_nll = 0.0
 
@@ -110,10 +110,10 @@ def trainer(config):
 
         # Log the epoch number and average validation loss
         print("Epoch {}: Val NLL Loss = {:.4f},".format(epoch+1, val_nll))
-        wandb.log({
-                "epoch": epoch, 
-                "val_nll": val_nll
-                })
+        # wandb.log({
+        #         "epoch": epoch, 
+        #         "val_nll": val_nll
+        #         })
 
         if (epoch+1)%config['save_interval_epoch'] == 0:
             torch.save({
@@ -123,40 +123,109 @@ def trainer(config):
                 'enc_dec_opt_state_dict': enc_dec_opt.state_dict(),
             }, f"{checkpoint_dir}/{config['exp_name']}/model_epoch_{epoch+1}.pt")
 
+def generate(config, input_texts):
+
+    # Initializing the Encoder and the Decoder model architecture
+    if config['encoder'] == 'roberta':
+        encoder_tokenizer = RobertaTokenizer.from_pretrained("roberta-base")
+        encoder = RobertaEncoder.from_pretrained("roberta-base").to(device)
+    if config['decoder'] == 'gpt2':
+        decoder_tokenizer = GPT2Tokenizer.from_pretrained("gpt2", eos_token='<|endoftext|>')
+        decoder = GPT2Decoder(num_tokens=len(decoder_tokenizer)).to(device)
+
+    # Load the saved model using the weights saved
+    checkpoint = torch.load(f"{checkpoint_dir}/{config['exp_name']}/model_epoch_{config['last_epoch']}.pt")
+    encoder.load_state_dict(checkpoint['encoder_state_dict'])
+    decoder.load_state_dict(checkpoint['decoder_state_dict'])
+    encoder.eval()
+    decoder.eval()
+
+    # Get the content Embedding
+    enc_tokenized = encoder_tokenizer.batch_encode_plus(input_texts, add_special_tokens=True, padding=True, return_tensors='pt').to(device)
+    content_embedding, _, _ = encoder(
+        input_ids = enc_tokenized['input_ids'].squeeze(),
+        attention_mask = enc_tokenized['attention_mask'].squeeze()
+    )
+
+    # Pass it to the generate function of the decoder
+    # dec_bos_token = '<|endoftext|> '
+    # prompts = [dec_bos_token for i in range(len(input_texts))]
+    # prompts_tokenized = decoder_tokenizer.batch_encode_plus(prompts, add_special_tokens=True, return_tensors="pt").to(device)
+
+    # output = decoder.greedy_decode(content_embedding = content_embedding,
+    #                         input_ids = prompts_tokenized['input_ids'].squeeze(),
+    #                         attention_mask = prompts_tokenized['attention_mask'].squeeze(),
+    #                         max_length = 100)
+
+    # output_texts = decoder_tokenizer.decode(output, skip_special_tokens=True)
+
+    output_texts = decoder.generate(content_embedding = content_embedding,
+                                    max_length = 10,
+                                    tokenizer = decoder_tokenizer)
+
+    for i in range(len(input_texts)):
+        print(f'Input Text : {input_texts[i]}')
+        print(f'Output Text : {decoder_tokenizer.decode(output_texts[i])}')
+
+    return
+
+
 if __name__ == "__main__":
+
+    # start a new wandb run to track this script
+    # config = {
+    #     'exp_name': 'autoencoder_v1',
+    #     'mode' : 'train',
+    #     # Architecture parameters
+    #     'encoder' : 'roberta',
+    #     'decoder' : 'gpt2',
+    #     # Data Loader parameters
+    #     'dataset' : 'yelp',
+    #     'raw_data_dir' : "/local1/pshah7/insnet/data/yelp/raw",
+    #     'train_batch_size' : 512,
+    #     'val_batch_size' : 512,
+    #     'num_workers' : 6,
+    #     # Optimizer Parameters
+    #     'optimizer' : 'adam',
+    #     'classifier_lr' : 1e-5,
+    #     'enc_dec_lr' : 1e-5,
+    #     # Training hyperparameters
+    #     'total_epochs' : 60,
+    #     'logging_interval_batch' : 200,
+    #     'save_interval_epoch' : 1,
+    # }
+
+    # model_dir = f"{checkpoint_dir}/{config['exp_name']}"
+    # if not os.path.exists(model_dir):
+    #     os.makedirs(model_dir)
+    
+    # wandb.init(
+    #     # set the wandb project where this run will be logged
+    #     project="style-transfer",
+    #     entity='parthushah8',
+    #     name=config['exp_name'],
+    #     # track hyperparameters and run metadata
+    #     config=config,
+    # )
+    # trainer(config)
+    # wandb.finish()
+
     # start a new wandb run to track this script
     config = {
         'exp_name': 'autoencoder_v1',
+        'mode': 'generate',
         # Architecture parameters
         'encoder' : 'roberta',
         'decoder' : 'gpt2',
-        # Data Loader parameters
-        'dataset' : 'yelp',
-        'raw_data_dir' : "/local1/pshah7/insnet/data/yelp/raw",
-        'train_batch_size' : 4,
-        'val_batch_size' : 4,
-        'num_workers' : 6,
-        # Optimizer Parameters
-        'optimizer' : 'adam',
-        'classifier_lr' : 1e-5,
-        'enc_dec_lr' : 1e-5,
-        # Training hyperparameters
-        'total_epochs' : 60,
-        'logging_interval_batch' : 200,
-        'save_interval_epoch' : 5,
+        'add_sep_token' : False,
+        # Last Epoch from where to load the model
+        'last_epoch' : 20
     }
 
     model_dir = f"{checkpoint_dir}/{config['exp_name']}"
     if not os.path.exists(model_dir):
-        os.makedirs(model_dir)
+        print(f"Error: {config['exp_name']} No such Model Directory exists")
     
-    wandb.init(
-        # set the wandb project where this run will be logged
-        project="style-transfer",
-        entity='parthushah8',
-        name=config['exp_name'],
-        # track hyperparameters and run metadata
-        config=config,
-    )
-    trainer(config)
-    wandb.finish()
+    input_texts = ["my goodness it was so gross .", "the house chow fun was also superb ."]
+
+    generate(config, input_texts)
